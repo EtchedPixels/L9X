@@ -15,8 +15,6 @@
  * interpreter by Glen Summers et al.
  */
 
-#define TEXT_VERSION2
-
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,34 +53,109 @@ static uint8_t wordcount;
 
 static uint16_t seed;	/* Random numbers */
 
+static void error(const char *p);
+
 /*
  *	I/O routines. Need to remove stdio and add wrapping logic
  */
-void print_num(uint16_t num)
+
+static char wbuf[80];
+static int wbp = 0;
+static int xpos = 0;
+static uint8_t cols;
+
+static void display_init(void)
 {
-  printf("%d", num);
+  char *c;
+#ifdef TIOCGWINSZ
+  struct winsize w;
+  if (ioctl(0, TIOCGWINSZ, &w) != -1) {
+    cols = ws.ws_col;
+    return;
+  }
+#elif VTSIZE
+  int16_t v = ioctl(0, VTSIZE, 0);
+  if (v != -1) {
+    cols = v & 0xFF;
+    return;
+  }
+#endif
+  c = getenv("COLS");
+  cols = c ? atoi(c): 80;
+  if (cols == 0)
+    cols = 80;
 }
 
-void print_char(uint8_t c)
+static void display_exit(void)
+{
+}
+
+static void flush_word(void)
+{
+  write(1, wbuf, wbp);
+  xpos += wbp;
+  wbp = 0;
+}
+
+static void char_out(char c)
+{
+  if (c == '\n') {
+    flush_word();
+    write(1, "\n", 1);
+    xpos = 0;
+    return;
+  }
+  if (c != ' ') {
+    if (wbp < 80)
+      wbuf[wbp++] = c;
+    return;
+  }
+  if (xpos + wbp >= cols) {
+    xpos = 0;
+    write(1,"\n", 1);
+  }
+  flush_word();
+  write(1," ", 1);
+  xpos++;
+}
+
+static void string_out(const char *p)
+{
+  while(*p)
+    char_out(*p++);
+}
+
+static void print_num(uint16_t v)
+{
+#ifdef __linux__
+  char buf[9];
+  snprintf(buf, 8, "%d", v);	/* FIXME: avoid expensive snprintf */
+  string_out(buf);
+#else
+  string_out(_itoa(v));
+#endif
+}
+
+static void read_line(void)
+{
+  int l = read(0, buffer, sizeof(buffer));
+  if (l < 0)
+    error("read");
+  buffer[l] = 0;
+  if (l && buffer[l-1] == '\n')
+    buffer[l-1] = 0;
+}
+
+static void print_char(uint8_t c)
 {
   if (c == 0x25)
     c = '\n';
   else if (c == 0x5F)
     c = ' ';
-  putchar(c);
+  char_out(c);
 }
 
-void read_line(void)
-{
-  char *p;
-  if (fgets(buffer, sizeof(buffer), stdin) == NULL)
-    exit(1);
-  p = strchr(buffer, '\n');
-  if (p)
-    *p = 0;
-}
-
-void error(const char *p)
+static void error(const char *p)
 {
   write(2, p, strlen(p));
   write(2, "\n", 1);
@@ -99,7 +172,7 @@ void error(const char *p)
 /* FIXME: for version 2 games they swapped the 1 markers for length bytes
    with an odd hack where a 0 length means 255 + nextbyte (unless 0 if so
    repeat */
-void decompress(uint8_t *p, uint16_t m)
+static void decompress(uint8_t *p, uint16_t m)
 {
   uint8_t d;
   /* Walk the table looking for 1 bytes and counting off our
@@ -115,7 +188,7 @@ void decompress(uint8_t *p, uint16_t m)
 }
 #else
 
-uint8_t *msglen(uint8_t *p, uint16_t *l)
+static uint8_t *msglen(uint8_t *p, uint16_t *l)
 {
   *l = 0;
   while(!*p) {
@@ -126,7 +199,7 @@ uint8_t *msglen(uint8_t *p, uint16_t *l)
   return p;
 }
   
-void decompress(uint8_t *p, uint16_t m)
+static void decompress(uint8_t *p, uint16_t m)
 {
   uint8_t d;
   uint16_t l;
@@ -151,7 +224,7 @@ void decompress(uint8_t *p, uint16_t m)
 }
 #endif
 
-void print_message(uint16_t m)
+static void print_message(uint16_t m)
 {
   decompress(messages, m);
 }
@@ -167,7 +240,7 @@ static uint8_t reverse[] = {
   0x1b
 };
 
-void lookup_exit(void)
+static void lookup_exit(void)
 {
   uint8_t l = variables[*pc++];
   uint8_t d = variables[*pc++];
@@ -224,7 +297,7 @@ void lookup_exit(void)
   variables[*pc++] = 0;
 }
 
-uint8_t wordcmp(char *s, uint8_t *p, uint8_t *v)
+static uint8_t wordcmp(char *s, uint8_t *p, uint8_t *v)
 {
   do {
     if (*s != 0 && toupper(*s++) != (*p & 0x7F))
@@ -234,7 +307,7 @@ uint8_t wordcmp(char *s, uint8_t *p, uint8_t *v)
   return 1;
 }
 
-uint8_t matchword(char *s)
+static uint8_t matchword(char *s)
 {
   uint8_t *p = dictionary;
   uint8_t v;
@@ -253,7 +326,7 @@ uint8_t matchword(char *s)
   return 0xFF;
 }
 
-void do_input(void)
+static void do_input(void)
 {
   uint8_t *w = wordbuf;
   char *p = buffer;
@@ -292,7 +365,7 @@ void do_input(void)
  *	various helpers for "game" things.
  */
 
-uint16_t constant(void)
+static uint16_t constant(void)
 {
   uint16_t r = *pc++;
   if (!(opcode & 0x40))
@@ -300,7 +373,7 @@ uint16_t constant(void)
   return r;
 }
 
-uint8_t *address(void)
+static uint8_t *address(void)
 {
   if (opcode & 0x20) {
     int8_t s = (int8_t)*pc++;
@@ -310,7 +383,7 @@ uint8_t *address(void)
   return pcbase + pc[-2] + (pc[-1] << 8);
 } 
 
-void skipaddress(void)
+static void skipaddress(void)
 {
   if (!(opcode & 0x20))
     pc++;
@@ -318,7 +391,7 @@ void skipaddress(void)
 }
 
 /* List ops access a small fixed number of tables */
-void listop(void)
+static void listop(void)
 {
   uint8_t *base = tables[(opcode & 0x1F) + 1];
   if (base == NULL)
@@ -339,11 +412,13 @@ void listop(void)
         (opcode & 0x1F) + 1, base - tables[(opcode & 0x1F) + 1], variables[*pc]); */
       *base = variables[*pc++];
     }
-  } else
-    fprintf(stderr, "LISTFAULT %p %p %p\n", base, game, lists);
+  } else {
+/*    fprintf(stderr, "LISTFAULT %p %p %p\n", base, game, lists); */
+    error("LISTFAULT");
+  }
 }  
 
-void execute(void)
+static void execute(void)
 {
   uint8_t *base;
   uint8_t tmp;
@@ -407,8 +482,8 @@ void execute(void)
             stack = stackbase;
             break;
           default:
-            fprintf(stderr, "Unknown driver function %d\n", pc[-1]);
-            exit(1);
+/*            fprintf(stderr, "Unknown driver function %d\n", pc[-1]); */
+            error("unkndriv");
         }
         break;
       case 7:
@@ -507,8 +582,8 @@ void execute(void)
       case 28:
         /* print input */      
       default:
-        fprintf(stderr, "bad op %d\n", opcode);
-        exit(1);
+/*        fprintf(stderr, "bad op %d\n", opcode); */
+        error("badop");
     }
   }
 }
@@ -520,31 +595,28 @@ int main(int argc, char *argv[])
   uint8_t off = 4;
   int i;
   
-  if (argc == 1) {
+  if (argc == 1)
     error("l9x [game.dat]\n");
-    exit(1);
-  }
+
   fd = open(argv[1], O_RDONLY);
   if (fd == -1) {
     perror(argv[1]);
     exit(1);
   }
   /* FIXME: allocate via sbrk once removed stdio usage */
-  if ((gamesize = read(fd, game, sizeof(game))) < 1024) {
+  if ((gamesize = read(fd, game, sizeof(game))) < 1024)
     error("l9x: not a valid game\n");
-    exit(1);
-  }
   close(fd);
 
   /* Header starts with message and decompression dictionary */
   messages = game + (game[0] | (game[1] << 8));
   worddict = game + (game[2] | (game[3] << 8));
-  printf("Messages at %04lx\n", messages - game);
-  printf("Word Dictionary at %04lx\n", worddict - game);
+/*  printf("Messages at %04lx\n", messages - game);
+  printf("Word Dictionary at %04lx\n", worddict - game); */
   /* Then the tables for list ops */
   for (i = 0; i  < 12; i++) {
     uint16_t v = game[off] | (game[off + 1] << 8);
-    printf("Table %d at %04x\n", i, v);
+/*    printf("Table %d at %04x\n", i, v); */
     if (i != 11 && (v & 0x8000))
       tables[i] = lists + (v & 0x7FFF);
     else
@@ -558,10 +630,11 @@ int main(int argc, char *argv[])
   /* 3 and 4 are used for getnextobject and friends on later games,
      9 is used for driver magic and ramsave stuff */
   
-  printf("Beginning execution PC = %04lx\n", pc - game);
+/*  printf("Beginning execution PC = %04lx\n", pc - game); */
+
+  display_init();
   
   seed = time(NULL);
 
-  print_message(1);
   execute();
 }
