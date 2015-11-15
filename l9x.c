@@ -24,7 +24,19 @@
 #include <ctype.h>
 #include <time.h>
 
+#ifdef VIRTUAL_GAME
+
+#define game_base NULL
+
+#else
+
+/* Running from memory directly */
+#define getb(x)	*(x)
 static uint8_t game[27000];
+#define game_base game
+
+#endif
+
 static uint16_t gamesize;
 
 static uint8_t *messages;
@@ -46,6 +58,7 @@ static uint16_t *stack = stackbase;
 static uint8_t lists[LISTSIZE];	/* Probably much bigger for later games */
 static uint16_t variables[256];
 static uint8_t *tables[16];
+static uint8_t ttype[16];
 
 static char buffer[80];
 static uint8_t wordbuf[3];
@@ -56,7 +69,7 @@ static uint16_t seed;	/* Random numbers */
 static void error(const char *p);
 
 /*
- *	I/O routines. Need to remove stdio and add wrapping logic
+ *	I/O routines.
  */
 
 static char wbuf[80];
@@ -178,8 +191,8 @@ static void decompress(uint8_t *p, uint16_t m)
   /* Walk the table looking for 1 bytes and counting off our
      input */
   while(m--)
-    while(*p++ != 1);
-  while((d = *p++) > 2) {
+    while(getb(p++) != 1);
+  while((d = getb(p++)) > 2) {
     if (d < 0x5E)
       print_char(d + 0x1d);
     else
@@ -191,11 +204,11 @@ static void decompress(uint8_t *p, uint16_t m)
 static uint8_t *msglen(uint8_t *p, uint16_t *l)
 {
   *l = 0;
-  while(!*p) {
+  while(!getb(p)) {
     *l += 255;
     p++;
   }
-  *l += *p++;
+  *l += getb(p++);
   return p;
 }
   
@@ -213,7 +226,7 @@ static void decompress(uint8_t *p, uint16_t m)
   p = msglen(p, &l);
   /* A 1 byte message means its 0 text chars long */
   while(--l) {
-    d = *p++;
+    d = getb(p++);
     if (d < 3)
       return;
     if (d < 0x5E)
@@ -242,8 +255,8 @@ static uint8_t reverse[] = {
 
 static void lookup_exit(void)
 {
-  uint8_t l = variables[*pc++];
-  uint8_t d = variables[*pc++];
+  uint8_t l = variables[getb(pc++)];
+  uint8_t d = variables[getb(pc++)];
   uint8_t *p = exitmap;
   uint8_t v;
   uint8_t ls = l;
@@ -253,7 +266,7 @@ static void lookup_exit(void)
   l--;		/* No entry 0 */
   while (l--) {
     do {
-      v = *p;
+      v = getb(p);
       p += 2;
     } while (!(v & 0x80));
   }
@@ -265,8 +278,8 @@ static void lookup_exit(void)
     v = *p;
 /*    printf("%02x:", v); */
     if ((v & 0x0F) == d) {
-      variables[*pc++] = ((*p++) >> 4) & 7;	/* Flag bits */
-      variables[*pc++] = *p++;
+      variables[getb(pc++)] = ((getb(p++)) >> 4) & 7;	/* Flag bits */
+      variables[getb(pc++)] = getb(p++);
 /*      printf("Found %d\n", variables[pc[-1]]); */
       return;
     }
@@ -281,29 +294,28 @@ static void lookup_exit(void)
     do {
 /*      if (ls == p[1])
         printf("%02x:%d / %02x\n", *p, p[1], d); */
-      v = *p++;
-      if (*p++ == ls && ((v & 0x1f) == d)) {
-        variables[*pc++] = (v >> 4) & 7;
-        variables[*pc++] = l;
+      v = getb(p++);
+      if (getb(p++) == ls && ((v & 0x1f) == d)) {
+        variables[getb(pc++)] = (v >> 4) & 7;
+        variables[getb(pc++)] = l;
         return;
       }
       if (v & 0x80)
         l++;
-    } while(*p);
+    } while(getb(p));
   }
 /*  printf("None\n"); */
-  /* FIXME: check v1 games use backlinks ? */
-  variables[*pc++] = 0;
-  variables[*pc++] = 0;
+  variables[getb(pc++)] = 0;
+  variables[getb(pc++)] = 0;
 }
 
 static uint8_t wordcmp(char *s, uint8_t *p, uint8_t *v)
 {
   do {
-    if (*s != 0 && toupper(*s++) != (*p & 0x7F))
+    if (*s != 0 && toupper(*s++) != (getb(p) & 0x7F))
       return 0;
-  } while(!(*p++ & 0x80));
-  *v = *p;
+  } while(!(getb(p++) & 0x80));
+  *v = getb(p);
   return 1;
 }
 
@@ -317,11 +329,11 @@ static uint8_t matchword(char *s)
     if (wordcmp(s, p, &v) == 1)
       return v;
     /* Find the next word */
-    while(*p && !(*p & 0x80))
+    while(getb(p) && !(getb(p) & 0x80))
       p++;
     p++;
     p++;
-  } while ((*p & 0x80) == 0);
+  } while ((getb(p) & 0x80) == 0);
   /* FIXME: correct code for non match check */
   return 0xFF;
 }
@@ -352,10 +364,10 @@ static void do_input(void)
 
   /* Finally put the first 3 words and the count into variables */
   w = wordbuf;
-  variables[*pc++] = *w++;
-  variables[*pc++] = *w++;
-  variables[*pc++] = *w++;
-  variables[*pc++] = wordcount;
+  variables[getb(pc++)] = *w++;
+  variables[getb(pc++)] = *w++;
+  variables[getb(pc++)] = *w++;
+  variables[getb(pc++)] = wordcount;
 }
 
 /*
@@ -367,20 +379,20 @@ static void do_input(void)
 
 static uint16_t constant(void)
 {
-  uint16_t r = *pc++;
+  uint16_t r = getb(pc++);
   if (!(opcode & 0x40))
-    r |= (*pc++) << 8;
+    r |= (getb(pc++)) << 8;
   return r;
 }
 
 static uint8_t *address(void)
 {
   if (opcode & 0x20) {
-    int8_t s = (int8_t)*pc++;
+    int8_t s = (int8_t)getb(pc++);
     return pc + s - 1;
   }
   pc += 2;
-  return pcbase + pc[-2] + (pc[-1] << 8);
+  return pcbase + getb(pc-2) + (getb(pc-1) << 8);
 } 
 
 static void skipaddress(void)
@@ -393,9 +405,10 @@ static void skipaddress(void)
 /* List ops access a small fixed number of tables */
 static void listop(void)
 {
-  uint8_t *base = tables[(opcode & 0x1F) + 1];
+  uint8_t t = (opcode & 0x1F) + 1;
+  uint8_t *base = tables[t];
   if (base == NULL)
-    error("bad list");
+    error("BADL");
 /*  fprintf(stderr, "List %d base %p\n", (opcode & 0x1F) + 1, base); */
   if (opcode & 0x20)
     base += variables[*pc++];
@@ -406,15 +419,20 @@ static void listop(void)
     if (!(opcode & 0x40)) {
 /*      printf("L%d O%ld read %d\n",
         (opcode & 0x1F) + 1, base - tables[(opcode & 0x1F) + 1], *base); */
-      variables[*pc++] = *base;
+      if (ttype[t])
+        variables[getb(pc++)] = *base;
+      else
+        variables[getb(pc++)] = getb(base);
     } else { 
 /*      printf("L%d O%ld assign %d\n",
         (opcode & 0x1F) + 1, base - tables[(opcode & 0x1F) + 1], variables[*pc]); */
+      if (ttype[t] == 0)
+        error("WFLT");
       *base = variables[*pc++];
     }
   } else {
 /*    fprintf(stderr, "LISTFAULT %p %p %p\n", base, game, lists); */
-    error("LISTFAULT");
+    error("LFLT");
   }
 }  
 
@@ -426,7 +444,7 @@ static void execute(void)
   
 
   while(!game_over) {
-    opcode = *pc++;
+    opcode = getb(pc++);
 /*    fprintf(stderr, "%02x:", opcode);  */
     if (opcode & 0x80)
       listop();
@@ -450,10 +468,10 @@ static void execute(void)
 /*        printf("POP %04x\n", pc - pcbase); */
         break;
       case 3:
-        print_num(variables[*pc++]);
+        print_num(variables[getb(pc++)]);
         break;
       case 4:
-        print_message(variables[*pc++]);
+        print_message(variables[getb(pc++)]);
         break;
       case 5:
         print_message(constant());
@@ -467,7 +485,7 @@ static void execute(void)
           case 2:
             /* Emulate the random number algorithm in the original */
             seed = (((seed << 8) + 0x0A - seed) << 2) + seed + 1;
-            variables[*pc++] = seed & 0xff;
+            variables[getb(pc++)] = seed & 0xff;
             break;
           case 3:
 /*            save_game(); */
@@ -491,26 +509,26 @@ static void execute(void)
         break;
       case 8:
         tmp16 = constant();
-        variables[*pc++] = tmp16;
+        variables[getb(pc++)] = tmp16;
         break;
       case 9:
-        variables[pc[1]] = variables[*pc];
+        variables[getb(pc + 1)] = variables[getb(pc)];
         pc += 2;
         break;
       case 10:
 /*        fprintf(stderr, "V%d (%d) += V%d (%d)\n", pc[1], variables[pc[1]],
           *pc, variables[*pc]); */
-        variables[pc[1]] += variables[*pc];
+        variables[getb(pc + 1)] += variables[getb(pc)];
         pc += 2;
         break;
       case 11:
-        variables[pc[1]] -= variables[*pc];
+        variables[getb(pc + 1)] -= variables[getb(pc)];
         pc += 2;
         break;
       case 14: /* This looks weird, but its basically a jump table */
-        base = pcbase + (*pc + (pc[1] << 8));
-        base += 2 * variables[pc[2]];	/* 16bit entries * */
-        pc = pcbase + *base + (base[1] << 8);
+        base = pcbase + (getb(pc) + (getb(pc + 1) << 8));
+        base += 2 * variables[getb(pc + 2)];	/* 16bit entries * */
+        pc = pcbase + getb(base) + (getb(base + 1) << 8);
         break;
       case 15:
         lookup_exit();
@@ -518,51 +536,51 @@ static void execute(void)
       case 16:
         /* These two are defined despite gcc whining. It doesn't matter
            which way around they get evaluated */
-        if (variables[*pc++] == variables[*pc++])
+        if (variables[getb(pc++)] == variables[getb(pc++)])
           pc = address();
         else
           skipaddress();
         break;
       case 17:
-        if (variables[*pc++] != variables[*pc++])
+        if (variables[getb(pc++)] != variables[getb(pc++)])
           pc = address();
         else
           skipaddress();
         break;
       case 18:
-        tmp = *pc++;
-        if (variables[tmp] < variables[*pc++])
+        tmp = getb(pc++);
+        if (variables[tmp] < variables[getb(pc++)])
           pc = address();
         else
           skipaddress();
         break;
       case 19:
-        tmp = *pc++;
-        if (variables[tmp] > variables[*pc++])
+        tmp = getb(pc++);
+        if (variables[tmp] > variables[getb(pc++)])
           pc = address();
         else
           skipaddress();
         break;
       case 24:
-        if (variables[*pc++] == constant())
+        if (variables[getb(pc++)] == constant())
           pc = address();
         else
           skipaddress();
         break;
       case 25:
-        if (variables[*pc++] != constant())
+        if (variables[getb(pc++)] != constant())
           pc = address();
         else
           skipaddress();
         break;
       case 26:
-        if (variables[*pc++] < constant())
+        if (variables[getb(pc++)] < constant())
           pc = address();
         else
           skipaddress();
         break;
       case 27:
-        if (variables[*pc++] > constant())
+        if (variables[getb(pc++)] > constant())
           pc = address();
         else
           skipaddress();
@@ -617,13 +635,14 @@ int main(int argc, char *argv[])
   for (i = 0; i  < 12; i++) {
     uint16_t v = game[off] | (game[off + 1] << 8);
 /*    printf("Table %d at %04x\n", i, v); */
-    if (i != 11 && (v & 0x8000))
+    if (i != 11 && (v & 0x8000)) {
       tables[i] = lists + (v & 0x7FFF);
-    else
+      ttype[i] = 1;
+    } else
       tables[i] = game + v;
     off += 2;
   }
-  /* Some of which have hard coded uses */
+  /* Some of which have hard coded uses and always point into game */
   exitmap = tables[0];
   dictionary = tables[1];
   pcbase = pc = tables[11];
