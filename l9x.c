@@ -69,11 +69,21 @@ static uint8_t game_over;
 
 static uint8_t opcode;
 
-static uint16_t stackbase[STACKSIZE];
-static uint16_t *stack = stackbase;
+static struct {
+  uint16_t c_hash;
+  uint16_t c_pc;
+  uint16_t c_sp;
+  uint16_t c_stackbase[STACKSIZE];
+  uint16_t c_variables[256];
+  uint8_t c_lists[LISTSIZE];	/* Probably much bigger for later games */
+} context;
 
-static uint8_t lists[LISTSIZE];	/* Probably much bigger for later games */
-static uint16_t variables[256];
+#define variables context.c_variables
+#define lists context.c_lists
+#define stackbase context.c_stackbase
+
+uint16_t *stack = stackbase;
+
 static uint8_t *tables[16];
 static uint8_t ttype[16];
 
@@ -131,7 +141,8 @@ static void char_out(char c)
 {
   if (c == '\n') {
     flush_word();
-    write(1, "\n", 1);
+    if (xpos)
+      write(1, "\n", 1);
     xpos = 0;
     return;
   }
@@ -174,6 +185,13 @@ static void read_line(void)
   buffer[l] = 0;
   if (l && buffer[l-1] == '\n')
     buffer[l-1] = 0;
+  xpos = 0;
+}
+
+static void read_filename(void)
+{
+  string_out("Filename: ");
+  read_line();
 }
 
 static void print_char(uint8_t c)
@@ -476,6 +494,63 @@ static void do_input(void)
   variables[getb(pc++)] = wordcount;
 }
 
+/* This is fairly mindless but will do for now */
+static uint16_t hash(void)
+{
+  uint8_t h = 0;
+  uint8_t *gp = game;
+  while(gp < game + 32)
+    h += *gp++;
+  return h;
+}
+
+static char savefail[] = "Save failed\n";
+static char loadfail[] = "Load failed\n";
+
+static void save_game(void)
+{
+  int fd;
+  read_filename();
+  if (!*buffer)
+    return;
+  fd = open(buffer, O_WRONLY|O_TRUNC|O_CREAT, 0600);
+  if (fd == -1) {
+    string_out(savefail);
+    return;
+  }
+  context.c_pc = pc - pcbase;
+  context.c_sp = stack - stackbase;
+  context.c_hash = hash();
+  if (write(fd, &context, sizeof(context)) != sizeof(context))
+    string_out(savefail);
+  close(fd);
+}
+
+static void load_game(void)
+{
+  int fd;
+
+  read_filename();
+  if (!*buffer)
+    return;
+  fd = open(buffer, O_RDONLY);
+  if (fd == -1) {
+    string_out(loadfail);
+    return;
+  }
+  if (read(fd, &context, sizeof(context)) != sizeof(context) ||
+      context.c_hash != hash()) {
+    string_out(loadfail);
+    memset(lists, 0, sizeof(lists));
+    memset(variables, 0, sizeof(variables));
+    pc = pcbase;
+  } else {
+    pc = pcbase + context.c_pc;
+    stack = stackbase + context.c_sp;
+  }
+  close(fd);
+}
+
 /*
  *	Implement the core Level 9 machine (for version 1 and 2 anyway)
  *
@@ -585,10 +660,10 @@ static void execute(void)
             variables[getb(pc++)] = seed & 0xff;
             break;
           case 3:
-/*            save_game(); */
+            save_game();
             break;
           case 4:
-/*            load_game(); */
+            load_game();
             break;
           case 5:
             memset(variables, 0, sizeof(variables));
