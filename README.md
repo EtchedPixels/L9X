@@ -14,11 +14,16 @@ front and compile it with the V1 messages.
 Double check the parsing logic is correct with regards to unknown words and
 word counting
 
-Load only the stuff we need and try and push some of it into virtual memory
-perhaps ?
+Once the Fuzix console scrolling support is tweaked add graphics by forking and
+running a second graphics process.
+
+Put a V2 header on Colossal Cave and test it
+
+Autodetect the text table type somehow.
 
 # V3 and V4 games
 
 These are generally bigger and the interpreter also has to provide some rather
-uglier and more complicated decompressors. V4 games would probably also need
-virtual memory implementing to page the game database.
+uglier and more complicated decompressors and output handlers. Possibly doable
+but further down the list.
+
