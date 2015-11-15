@@ -24,9 +24,26 @@
 #include <ctype.h>
 #include <time.h>
 
+/*
+ *	Defines
+ *
+ *	VIRTUAL_GAME	:	Page the game from disc file
+ *	STACKSIZE	:	Override stack size default (256)
+ *	LISTSIZE	:	Override list size default (1024)
+ *	TEXT_VERSION1	:	Interpreter for early stype text strings
+ */
+
+#ifndef STACKSIZE
+#define STACKSIZE	256	/* Probably needs more for later games */
+#endif
+#ifndef LISTSIZE
+#define LISTSIZE	1024	/* Later games need more */
+#endif
+
 #ifdef VIRTUAL_GAME
 
-#define game_base NULL
+static uint8_t game[32];
+#define game_base ((uint8_t *)NULL)
 
 #else
 
@@ -36,6 +53,8 @@ static uint8_t game[27000];
 #define game_base game
 
 #endif
+
+static int gamefile;
 
 static uint16_t gamesize;
 
@@ -50,11 +69,9 @@ static uint8_t game_over;
 
 static uint8_t opcode;
 
-#define STACKSIZE 256		/* Unclear what we need for V1/V2 */
 static uint16_t stackbase[STACKSIZE];
 static uint16_t *stack = stackbase;
 
-#define LISTSIZE 1024
 static uint8_t lists[LISTSIZE];	/* Probably much bigger for later games */
 static uint16_t variables[256];
 static uint8_t *tables[16];
@@ -170,10 +187,106 @@ static void print_char(uint8_t c)
 
 static void error(const char *p)
 {
+  display_exit();
   write(2, p, strlen(p));
   write(2, "\n", 1);
   exit(1);
 }
+
+#ifdef VIRTUAL_GAME
+
+#define NUM_PAGES	64		/* 16K */
+
+static uint8_t last_ah;
+static uint8_t *last_base;
+
+#ifdef STATISTICS
+static unsigned long slow;
+static unsigned long miss;
+static unsigned long fast;
+#define STAT(x)	((x)++)
+#else
+#define STAT(x)
+#endif
+
+static uint8_t page_cache[NUM_PAGES][256];
+static uint8_t page_addr[NUM_PAGES];
+static uint8_t page_pri[NUM_PAGES];	/* 0 = unused , 1+ is use count */
+
+static uint8_t page_alloc(void)
+{
+	uint8_t low = 255;
+	uint8_t i, lnum = 0;
+	for (i = 0; i < NUM_PAGES; i++) {
+		if (page_pri[i] == 0)
+			return i;
+		if (page_pri[i] < low) {
+			lnum = i;
+			low = page_pri[i];
+		}
+	}
+	return lnum;
+}
+
+static void page_sweep(void)
+{
+	uint8_t i;
+	for (i = 0; i < NUM_PAGES; i++)
+		if (page_pri[i] > 1)
+			page_pri[i] /= 2;
+}
+
+static void page_load(uint8_t slot, uint8_t ah)
+{
+	page_addr[slot] = ah;
+	page_pri[slot] = 0x80;
+	/* Caution - last page is not packed so a short read isn't
+	   always an error */
+	if (lseek(gamefile, (ah << 8), SEEK_SET) < 0 ||
+	    read(gamefile, page_cache[slot], 256) < 0) {
+		error("pageload");
+	}
+	/* Quick hack if you want to simulate disk loading on smaller
+	   devices */
+/*	usleep(10000);*/	/* DEBUG */
+}
+
+static uint8_t page_find(uint8_t ah)
+{
+	uint8_t i;
+	for (i = 0; i < NUM_PAGES; i++) {
+		if (page_addr[i] == ah) {
+			STAT(slow);
+			page_pri[i] |= 0x80;
+			return i;
+		}
+	}
+	page_sweep();
+	i = page_alloc();
+	page_load(i, ah);
+	STAT(miss);
+	return i;
+}
+
+static uint8_t getb(uint8_t *p)
+{
+	uint16_t addr = (uint16_t)p;
+	uint8_t ah = addr >> 8;
+	uint8_t c;
+
+	if (ah == last_ah) {
+		STAT(fast);
+		return last_base[addr&0xff];
+	}
+
+	/* Find the right buffer */
+	c = page_find(ah);
+	last_ah = ah;
+	last_base = page_cache[c];
+	return last_base[addr & 0xff];
+}
+
+#endif
 
 #ifdef TEXT_VERSION1
 /* Call initially with the messages as the pointer. Each message contains
@@ -261,7 +374,6 @@ static void lookup_exit(void)
   uint8_t v;
   uint8_t ls = l;
 
-/*  printf("Finding exit %d for location %d => ", d, l); */
   /* Scan through the table finding 0x80 end markers */
   l--;		/* No entry 0 */
   while (l--) {
@@ -270,17 +382,14 @@ static void lookup_exit(void)
       p += 2;
     } while (!(v & 0x80));
   }
-/*  printf("(%04x) ", p - exitmap); */
   /* Now find our exit */
   /* Basically each entry is a word in the form
      [Last.1][BiDir.1][Flags.2][Exit.4][Target.8] */
   do {
-    v = *p;
-/*    printf("%02x:", v); */
+    v = getb(p);
     if ((v & 0x0F) == d) {
       variables[getb(pc++)] = ((getb(p++)) >> 4) & 7;	/* Flag bits */
       variables[getb(pc++)] = getb(p++);
-/*      printf("Found %d\n", variables[pc[-1]]); */
       return;
     }
     p+=2;
@@ -292,8 +401,6 @@ static void lookup_exit(void)
     p = exitmap;
     l = 1;
     do {
-/*      if (ls == p[1])
-        printf("%02x:%d / %02x\n", *p, p[1], d); */
       v = getb(p++);
       if (getb(p++) == ls && ((v & 0x1f) == d)) {
         variables[getb(pc++)] = (v >> 4) & 7;
@@ -304,7 +411,6 @@ static void lookup_exit(void)
         l++;
     } while(getb(p));
   }
-/*  printf("None\n"); */
   variables[getb(pc++)] = 0;
   variables[getb(pc++)] = 0;
 }
@@ -409,29 +515,23 @@ static void listop(void)
   uint8_t *base = tables[t];
   if (base == NULL)
     error("BADL");
-/*  fprintf(stderr, "List %d base %p\n", (opcode & 0x1F) + 1, base); */
   if (opcode & 0x20)
-    base += variables[*pc++];
+    base += variables[getb(pc++)];
   else
-    base += *pc++;
-  if ((base >= game && base < game + gamesize) ||
+    base += getb(pc++);
+  if ((base >= game_base && base < game_base + gamesize) ||
       (base >= lists && base < lists + sizeof(lists))) {
     if (!(opcode & 0x40)) {
-/*      printf("L%d O%ld read %d\n",
-        (opcode & 0x1F) + 1, base - tables[(opcode & 0x1F) + 1], *base); */
       if (ttype[t])
         variables[getb(pc++)] = *base;
       else
         variables[getb(pc++)] = getb(base);
     } else { 
-/*      printf("L%d O%ld assign %d\n",
-        (opcode & 0x1F) + 1, base - tables[(opcode & 0x1F) + 1], variables[*pc]); */
       if (ttype[t] == 0)
         error("WFLT");
-      *base = variables[*pc++];
+      *base = variables[getb(pc++)];
     }
   } else {
-/*    fprintf(stderr, "LISTFAULT %p %p %p\n", base, game, lists); */
     error("LFLT");
   }
 }  
@@ -445,7 +545,6 @@ static void execute(void)
 
   while(!game_over) {
     opcode = getb(pc++);
-/*    fprintf(stderr, "%02x:", opcode);  */
     if (opcode & 0x80)
       listop();
     else switch(opcode & 0x1f) {
@@ -456,7 +555,6 @@ static void execute(void)
           uint8_t *newpc = address();
           if (stack == stackbase + sizeof(stackbase))
             error("stack overflow");
-/*          printf("PUSH %04x\n", pc - pcbase); */
           *stack++ = pc - pcbase;
           pc = newpc;
         }
@@ -465,7 +563,6 @@ static void execute(void)
         if (stack == stackbase)
           error("stack underflow");
         pc = pcbase + *--stack;
-/*        printf("POP %04x\n", pc - pcbase); */
         break;
       case 3:
         print_num(variables[getb(pc++)]);
@@ -477,7 +574,7 @@ static void execute(void)
         print_message(constant());
         break;
       case 6:
-        switch(*pc++) {
+        switch(getb(pc++)) {
           case 1:
             game_over = 1;
             /* FIXME: call driver in later game engines */
@@ -516,8 +613,6 @@ static void execute(void)
         pc += 2;
         break;
       case 10:
-/*        fprintf(stderr, "V%d (%d) += V%d (%d)\n", pc[1], variables[pc[1]],
-          *pc, variables[*pc]); */
         variables[getb(pc + 1)] += variables[getb(pc)];
         pc += 2;
         break;
@@ -609,37 +704,38 @@ static void execute(void)
 
 int main(int argc, char *argv[])
 {
-  int fd;
   uint8_t off = 4;
   int i;
   
   if (argc == 1)
     error("l9x [game.dat]\n");
 
-  fd = open(argv[1], O_RDONLY);
-  if (fd == -1) {
+  gamefile = open(argv[1], O_RDONLY);
+  if (gamefile == -1) {
     perror(argv[1]);
     exit(1);
   }
   /* FIXME: allocate via sbrk once removed stdio usage */
-  if ((gamesize = read(fd, game, sizeof(game))) < 1024)
+  if ((gamesize = read(gamefile, game, sizeof(game))) < 32)
     error("l9x: not a valid game\n");
-  close(fd);
+#ifdef VIRTUAL_GAME
+  gamesize = 0xff00;
+  memset(page_addr, 0xff, sizeof(page_addr));
+#else
+  close(gamefile);
+#endif
 
   /* Header starts with message and decompression dictionary */
-  messages = game + (game[0] | (game[1] << 8));
-  worddict = game + (game[2] | (game[3] << 8));
-/*  printf("Messages at %04lx\n", messages - game);
-  printf("Word Dictionary at %04lx\n", worddict - game); */
+  messages = game_base + (game[0] | (game[1] << 8));
+  worddict = game_base + (game[2] | (game[3] << 8));
   /* Then the tables for list ops */
   for (i = 0; i  < 12; i++) {
     uint16_t v = game[off] | (game[off + 1] << 8);
-/*    printf("Table %d at %04x\n", i, v); */
     if (i != 11 && (v & 0x8000)) {
       tables[i] = lists + (v & 0x7FFF);
       ttype[i] = 1;
     } else
-      tables[i] = game + v;
+      tables[i] = game_base + v;
     off += 2;
   }
   /* Some of which have hard coded uses and always point into game */
@@ -649,11 +745,13 @@ int main(int argc, char *argv[])
   /* 3 and 4 are used for getnextobject and friends on later games,
      9 is used for driver magic and ramsave stuff */
   
-/*  printf("Beginning execution PC = %04lx\n", pc - game); */
-
   display_init();
   
   seed = time(NULL);
 
   execute();
+
+#ifdef STATISTICS
+  printf("Fast %d Slow %d Miss %d\n", fast, slow, miss);
+#endif
 }
