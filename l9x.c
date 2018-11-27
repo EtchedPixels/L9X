@@ -111,7 +111,7 @@ static void display_init(void)
 #ifdef TIOCGWINSZ
   struct winsize w;
   if (ioctl(0, TIOCGWINSZ, &w) != -1) {
-    cols = ws.ws_col;
+    cols = w.ws_col;
     return;
   }
 #elif VTSIZE
